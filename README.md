@@ -1,74 +1,144 @@
-# Go Expert: Desafio Concorrência (Sistema de Leilão)
+# Go Expert: Desafio Concorrência — Sistema de Leilão
 
-Este repositório contém a resolução do desafio prático de **Concorrência com Golang** do treinamento **Go Expert** da **Full Cycle**.
+Resolução do desafio prático de **Concorrência com Golang** do treinamento **Go Expert (Full Cycle)**.
 
-O objetivo do desafio é implementar uma rotina concorrente em background (Goroutines) que monitore a duração dos leilões e realize o **fechamento automático** dos leilões expirados, atualizando o status correspondente no banco de dados MongoDB.
+## 🎯 Objetivo do Desafio
+
+Implementar o **fechamento automático de leilões** utilizando **Goroutines** em background. Quando um leilão é criado, uma goroutine é disparada assincronamente e — ao expirar o tempo definido em `AUCTION_DURATION` — atualiza o status do leilão para `Completed` no MongoDB sem nenhuma intervenção manual.
+
+### O que foi implementado
+- Goroutine de fechamento automático disparada a cada criação de leilão em `create_auction.go`
+- Verificador de boot que reencerra leilões órfãos ao reiniciar a aplicação
+- Variável de ambiente `AUCTION_DURATION` para controlar o tempo de expiração
+- Teste de integração automatizado que valida o comportamento
 
 ---
 
-## 🛠️ Tecnologias Utilizadas
+## ⚙️ Variáveis de Ambiente
 
-- **Linguagem**: Go (Golang) 1.20
-- **Framework Web**: Gin-Gonic (HTTP)
-- **Banco de Dados**: MongoDB (Persistência e Cache de Verificação)
-- **Containerização**: Docker e Docker Compose
+Configuradas em `cmd/auction/.env`:
 
----
-
-## ⚙️ Configuração das Variáveis de Ambiente
-
-As configurações de tempo do leilão e gravação de lances em lote são definidas no arquivo `.env` localizado em `cmd/auction/.env`.
-
-Principais variáveis relacionadas à duração e concorrência:
-- `AUCTION_DURATION` (ou `AUCTION_INTERVAL`): Determina a duração do ciclo de vida de um leilão ativo (ex: `10s`, `1m`, `5m`).
-- `MAX_BATCH_SIZE`: Quantidade máxima de lances agrupados no canal de concorrência antes de fazer a inserção em massa no banco.
-- `BATCH_INSERT_INTERVAL`: Tempo máximo de espera para fazer a inserção em lote no MongoDB de lances pendentes em memória (ex: `20s`).
+| Variável | Descrição | Exemplo |
+|---|---|---|
+| `AUCTION_DURATION` | **Duração do leilão** — altere para testar o fechamento | `20s`, `1m`, `5m` |
+| `BATCH_INSERT_INTERVAL` | Intervalo de inserção de lances em lote | `20s` |
+| `MAX_BATCH_SIZE` | Tamanho máximo do lote de lances | `4` |
+| `MONGODB_URL` | URL de conexão com o MongoDB | `mongodb://...` |
+| `MONGODB_DB` | Nome do banco de dados | `auctions` |
 
 ---
 
 ## 🚀 Como Rodar o Projeto
 
-Toda a infraestrutura do banco de dados MongoDB e a aplicação Go estão configuradas para subir via Docker Compose.
+### Pré-requisitos
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) instalado e em execução.
 
-### 1. Iniciar os Serviços
-Execute o seguinte comando na raiz do projeto para construir a imagem e subir os containers em segundo plano:
+### 1. Clonar o repositório
+```bash
+git clone https://github.com/jorgegabrielti/labs-auction-goexpert.git
+cd labs-auction-goexpert
+```
+
+### 2. Configurar o tempo do leilão (opcional)
+Para testar mais rapidamente, edite `cmd/auction/.env` e reduza `AUCTION_DURATION`:
+```env
+AUCTION_DURATION=20s
+```
+
+### 3. Subir os containers
 ```bash
 docker compose up -d --build
 ```
 
-A aplicação ficará disponível na porta local `:8080`.
+A aplicação ficará disponível em `http://localhost:8080`.
 
-### 2. Parar os Serviços
-Para derrubar os containers e limpar os recursos criados:
+### 4. Parar os containers
 ```bash
 docker compose down
 ```
 
 ---
 
-## 🧪 Como Rodar os Testes Automatizados
+## ✅ Como Validar o Fechamento Automático (Passo a Passo)
 
-Implementamos um teste de integração de ponta a ponta (`create_auction_test.go`) para testar o fechamento automático assíncrono. O teste cria um leilão de teste com expiração curta (`1s`), aguarda o tempo e verifica se o status foi alterado no banco.
+Esta é a validação completa do requisito principal do desafio:
 
-Caso você não tenha um banco de dados MongoDB de testes de pé localmente na máquina host, o teste detecta a ausência de conexão e realiza um `t.Skip` gracioso em vez de falhar.
-
-Para executar os testes na máquina host:
+### Passo 1 — Criar um leilão
 ```bash
-go test -v ./internal/infra/database/auction/...
+curl -X POST http://localhost:8080/auction \
+  -H "Content-Type: application/json" \
+  -d '{"product_name":"Teclado Mecanico","category":"Perifericos","description":"Teclado sem fio para teste","condition":1}'
 ```
+**Resultado esperado:** HTTP `201 Created`
+
+### Passo 2 — Listar os leilões ativos (status=0)
+```bash
+curl http://localhost:8080/auction?status=0
+```
+**Resultado esperado:** o leilão criado aparece com `"status": 0` (Active).
+
+### Passo 3 — Aguardar o tempo configurado em `AUCTION_DURATION`
+Aguarde o tempo definido (padrão: `20s`).
+
+### Passo 4 — Verificar o fechamento automático
+```bash
+curl http://localhost:8080/auction?status=1
+```
+**Resultado esperado:** o leilão que estava ativo agora aparece com `"status": 1` (Completed) — **sem nenhuma intervenção manual**.
 
 ---
 
-## 🌐 Endpoints REST da API
+## 🧪 Testes Automatizados
 
-### Leilões (Auctions)
-- **Criar Leilão**: `POST /auction`
-  - Body (JSON): `{"product_name": "Nome", "category": "Categoria", "description": "Descrição", "condition": 1}`
-- **Listar Leilões**: `GET /auction` (Permite filtros via query string: `?status=0&category=categoria`)
-- **Buscar por ID**: `GET /auction/:auctionId`
-- **Leilão Vencedor**: `GET /auction/winner/:auctionId` (Retorna os dados do leilão e o maior lance ofertado).
+O teste de integração (`create_auction_test.go`) valida o ciclo completo de fechamento. Ele requer o MongoDB em execução.
 
-### Lances (Bids)
-- **Registrar Lance**: `POST /bid`
-  - Body (JSON): `{"user_id": "UUID_USER", "auction_id": "UUID_AUCTION", "amount": 150.0}`
-- **Listar Lances por Leilão**: `GET /bid/:auctionId`
+### Com Docker (recomendado)
+```bash
+# 1. Suba apenas o banco de dados
+docker compose up -d mongodb
+
+# 2. Execute os testes a partir da raiz do projeto
+AUCTION_DURATION=1s MONGODB_URL=mongodb://admin:admin@localhost:27017/auctions?authSource=admin go test -v ./internal/infra/database/auction/...
+```
+
+### O que o teste verifica
+1. Cria um leilão com `AUCTION_DURATION=1s`
+2. Confirma que o status inicial é `Active` (0)
+3. Aguarda `1.5s`
+4. Confirma que o status foi automaticamente alterado para `Completed` (1)
+
+---
+
+## 🌐 Endpoints da API
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `POST` | `/auction` | Criar um novo leilão |
+| `GET` | `/auction?status=0` | Listar leilões ativos |
+| `GET` | `/auction?status=1` | Listar leilões finalizados |
+| `GET` | `/auction/:auctionId` | Buscar leilão por ID |
+| `GET` | `/auction/winner/:auctionId` | Buscar vencedor do leilão |
+| `POST` | `/bid` | Registrar um lance |
+| `GET` | `/bid/:auctionId` | Listar lances de um leilão |
+| `GET` | `/user/:userId` | Buscar usuário por ID |
+
+### Exemplo de corpo para criação de leilão
+```json
+{
+  "product_name": "Produto Teste",
+  "category": "Categoria",
+  "description": "Descrição com ao menos 10 caracteres",
+  "condition": 1
+}
+```
+
+> **Condition**: `1` = Novo, `2` = Usado, `3` = Recondicionado
+
+### Exemplo de corpo para lance
+```json
+{
+  "user_id": "uuid-do-usuario",
+  "auction_id": "uuid-do-leilao",
+  "amount": 150.00
+}
+```
