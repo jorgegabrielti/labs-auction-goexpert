@@ -7,10 +7,11 @@ Resolução do desafio prático de **Concorrência com Golang** do treinamento *
 Implementar o **fechamento automático de leilões** utilizando **Goroutines** em background. Quando um leilão é criado, uma goroutine é disparada assincronamente e — ao expirar o tempo definido em `AUCTION_DURATION` — atualiza o status do leilão para `Completed` no MongoDB sem nenhuma intervenção manual.
 
 ### O que foi implementado
-- Goroutine de fechamento automático disparada a cada criação de leilão em `create_auction.go`
-- Verificador de boot que reencerra leilões órfãos ao reiniciar a aplicação
-- Variável de ambiente `AUCTION_DURATION` para controlar o tempo de expiração
-- Teste de integração automatizado que valida o comportamento
+
+- **Goroutine de fechamento automático** disparada a cada criação de leilão em [`create_auction.go`](internal/infra/database/auction/create_auction.go)
+- **Verificador de boot** (`checkAndCloseExpiredAuctionsOnStartup`) que reencerra leilões órfãos ao reiniciar a aplicação
+- **Variável de ambiente `AUCTION_DURATION`** para controlar o tempo de expiração
+- **Teste de integração automatizado** que valida o comportamento concorrente
 
 ---
 
@@ -18,12 +19,12 @@ Implementar o **fechamento automático de leilões** utilizando **Goroutines** e
 
 Configuradas em `cmd/auction/.env`:
 
-| Variável | Descrição | Exemplo |
+| Variável | Descrição | Padrão |
 |---|---|---|
-| `AUCTION_DURATION` | **Duração do leilão** — altere para testar o fechamento | `20s`, `1m`, `5m` |
+| `AUCTION_DURATION` | **Duração do leilão** — altere para testar o fechamento | `20s` |
 | `BATCH_INSERT_INTERVAL` | Intervalo de inserção de lances em lote | `20s` |
 | `MAX_BATCH_SIZE` | Tamanho máximo do lote de lances | `4` |
-| `MONGODB_URL` | URL de conexão com o MongoDB | `mongodb://...` |
+| `MONGODB_URL` | URL de conexão com o MongoDB | `mongodb://admin:admin@mongodb:27017/...` |
 | `MONGODB_DB` | Nome do banco de dados | `auctions` |
 
 ---
@@ -39,8 +40,8 @@ git clone https://github.com/jorgegabrielti/labs-auction-goexpert.git
 cd labs-auction-goexpert
 ```
 
-### 2. Configurar o tempo do leilão (opcional)
-Para testar mais rapidamente, edite `cmd/auction/.env` e reduza `AUCTION_DURATION`:
+### 2. (Opcional) Ajustar o tempo do leilão
+Para testar mais rapidamente, edite `cmd/auction/.env`:
 ```env
 AUCTION_DURATION=20s
 ```
@@ -59,53 +60,122 @@ docker compose down
 
 ---
 
-## ✅ Como Validar o Fechamento Automático (Passo a Passo)
+## ✅ Validação do Fechamento Automático (Passo a Passo)
 
-Esta é a validação completa do requisito principal do desafio:
+Esta seção documenta a validação **real** realizada localmente, com os logs de saída.
 
 ### Passo 1 — Criar um leilão
+
 ```bash
 curl -X POST http://localhost:8080/auction \
   -H "Content-Type: application/json" \
-  -d '{"product_name":"Teclado Mecanico","category":"Perifericos","description":"Teclado sem fio para teste","condition":1}'
+  -d '{"product_name":"Notebook Gamer","category":"Informatica","description":"Notebook para validacao do fechamento automatico","condition":1}'
 ```
-**Resultado esperado:** HTTP `201 Created`
 
-### Passo 2 — Listar os leilões ativos (status=0)
+**Resultado:** HTTP `201 Created`
+
+---
+
+### Passo 2 — Confirmar status ATIVO (status=0)
+
 ```bash
 curl http://localhost:8080/auction?status=0
 ```
-**Resultado esperado:** o leilão criado aparece com `"status": 0` (Active).
 
-### Passo 3 — Aguardar o tempo configurado em `AUCTION_DURATION`
-Aguarde o tempo definido (padrão: `20s`).
+**Saída real obtida:**
+```json
+[
+  {
+    "id": "79c21fa3-6e38-465c-a92a-f2e43896c19d",
+    "product_name": "Notebook Gamer",
+    "category": "Informatica",
+    "description": "Notebook para validacao do fechamento automatico",
+    "condition": 1,
+    "status": 0,
+    "timestamp": "2026-07-29T00:06:48Z"
+  }
+]
+```
 
-### Passo 4 — Verificar o fechamento automático
+✅ Leilão criado às **21:06:48** com `"status": 0` (Active).
+
+---
+
+### Passo 3 — Aguardar o tempo configurado
+
+Aguarde o tempo definido em `AUCTION_DURATION` (padrão: `20s`).
+
+---
+
+### Passo 4 — Confirmar fechamento automático (status=1)
+
 ```bash
 curl http://localhost:8080/auction?status=1
 ```
-**Resultado esperado:** o leilão que estava ativo agora aparece com `"status": 1` (Completed) — **sem nenhuma intervenção manual**.
+
+**Saída real obtida (25 segundos depois):**
+```json
+[
+  {
+    "id": "79c21fa3-6e38-465c-a92a-f2e43896c19d",
+    "product_name": "Notebook Gamer",
+    "category": "Informatica",
+    "description": "Notebook para validacao do fechamento automatico",
+    "condition": 1,
+    "status": 1,
+    "timestamp": "2026-07-29T00:06:48Z"
+  }
+]
+```
+
+✅ Às **21:07:13** o leilão aparece com `"status": 1` (Completed) — **sem nenhuma intervenção manual**.
+
+> O fechamento ocorreu em ~25s (20s de duração + 5s de margem de verificação), provando que a **goroutine funcionou corretamente em background**.
 
 ---
 
 ## 🧪 Testes Automatizados
 
-O teste de integração (`create_auction_test.go`) valida o ciclo completo de fechamento. Ele requer o MongoDB em execução.
+O teste de integração [`create_auction_test.go`](internal/infra/database/auction/create_auction_test.go) valida o ciclo completo automaticamente.
 
-### Com Docker (recomendado)
+### Como executar
+
 ```bash
 # 1. Suba apenas o banco de dados
 docker compose up -d mongodb
 
-# 2. Execute os testes a partir da raiz do projeto
-AUCTION_DURATION=1s MONGODB_URL=mongodb://admin:admin@localhost:27017/auctions?authSource=admin go test -v ./internal/infra/database/auction/...
+# 2. Execute os testes (na raiz do projeto)
+AUCTION_DURATION=1s \
+MONGODB_URL=mongodb://admin:admin@localhost:27017/auctions?authSource=admin \
+go test -v -timeout 30s ./internal/infra/database/auction/...
 ```
 
+> **No Windows (PowerShell):**
+> ```powershell
+> $env:AUCTION_DURATION="1s"
+> $env:MONGODB_URL="mongodb://admin:admin@localhost:27017/auctions?authSource=admin"
+> go test -v -timeout 30s ./internal/infra/database/auction/...
+> ```
+
+### Saída real do teste executado localmente
+
+```
+=== RUN   TestCreateAuction_AutomaticClose
+--- PASS: TestCreateAuction_AutomaticClose (1.56s)
+PASS
+ok      fullcycle-auction_go/internal/infra/database/auction    3.454s
+```
+
+✅ **Teste passou em 3.45s** com `AUCTION_DURATION=1s`.
+
 ### O que o teste verifica
-1. Cria um leilão com `AUCTION_DURATION=1s`
-2. Confirma que o status inicial é `Active` (0)
-3. Aguarda `1.5s`
-4. Confirma que o status foi automaticamente alterado para `Completed` (1)
+
+| Passo | Ação | Resultado esperado |
+|---|---|---|
+| 1 | Cria um leilão com `AUCTION_DURATION=1s` | Leilão inserido no MongoDB |
+| 2 | Lê o status imediatamente | `status = 0` (Active) |
+| 3 | Aguarda 1.5s | — |
+| 4 | Lê o status novamente | `status = 1` (Completed) — alterado pela goroutine |
 
 ---
 
@@ -114,15 +184,16 @@ AUCTION_DURATION=1s MONGODB_URL=mongodb://admin:admin@localhost:27017/auctions?a
 | Método | Rota | Descrição |
 |---|---|---|
 | `POST` | `/auction` | Criar um novo leilão |
-| `GET` | `/auction?status=0` | Listar leilões ativos |
-| `GET` | `/auction?status=1` | Listar leilões finalizados |
+| `GET` | `/auction?status=0` | Listar leilões **ativos** |
+| `GET` | `/auction?status=1` | Listar leilões **finalizados** |
 | `GET` | `/auction/:auctionId` | Buscar leilão por ID |
 | `GET` | `/auction/winner/:auctionId` | Buscar vencedor do leilão |
 | `POST` | `/bid` | Registrar um lance |
 | `GET` | `/bid/:auctionId` | Listar lances de um leilão |
 | `GET` | `/user/:userId` | Buscar usuário por ID |
 
-### Exemplo de corpo para criação de leilão
+### Corpo para criação de leilão
+
 ```json
 {
   "product_name": "Produto Teste",
@@ -132,9 +203,10 @@ AUCTION_DURATION=1s MONGODB_URL=mongodb://admin:admin@localhost:27017/auctions?a
 }
 ```
 
-> **Condition**: `1` = Novo, `2` = Usado, `3` = Recondicionado
+> **condition:** `1` = Novo, `2` = Usado, `3` = Recondicionado
 
-### Exemplo de corpo para lance
+### Corpo para lance
+
 ```json
 {
   "user_id": "uuid-do-usuario",
